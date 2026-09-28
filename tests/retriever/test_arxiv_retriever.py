@@ -63,6 +63,73 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
 
 
+def test_arxiv_retriever_falls_back_to_single_paper_fetch_on_batch_http_error(config, monkeypatch):
+    monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
+    monkeypatch.setattr(arxiv_retriever, "sleep", lambda _: None)
+
+    entries = [
+        feedparser.FeedParserDict({
+            "id": "oai:arXiv.org:1234.56789v1",
+            "title": "Paper 1",
+            "arxiv_announce_type": "new",
+        }),
+        feedparser.FeedParserDict({
+            "id": "oai:arXiv.org:9876.54321v1",
+            "title": "Paper 2",
+            "arxiv_announce_type": "new",
+        }),
+    ]
+    fake_feed = feedparser.FeedParserDict({
+        "feed": feedparser.FeedParserDict({"title": "ok"}),
+        "entries": entries,
+    })
+    monkeypatch.setattr(arxiv_retriever.feedparser, "parse", lambda _: fake_feed)
+
+    result_by_id = {
+        "1234.56789v1": SimpleNamespace(
+            title="Paper 1",
+            authors=[SimpleNamespace(name="Author 1")],
+            summary="Test abstract 1",
+            pdf_url="https://arxiv.org/pdf/1234.56789v1",
+            entry_id="https://arxiv.org/abs/1234.56789v1",
+            source_url=lambda: "https://arxiv.org/e-print/1234.56789v1",
+        ),
+        "9876.54321v1": SimpleNamespace(
+            title="Paper 2",
+            authors=[SimpleNamespace(name="Author 2")],
+            summary="Test abstract 2",
+            pdf_url="https://arxiv.org/pdf/9876.54321v1",
+            entry_id="https://arxiv.org/abs/9876.54321v1",
+            source_url=lambda: "https://arxiv.org/e-print/9876.54321v1",
+        ),
+    }
+    calls = {"batch": 0, "single": 0}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        def results(self, search):
+            ids = list(search.id_list)
+            if len(ids) > 1:
+                calls["batch"] += 1
+                raise arxiv_retriever.arxiv.HTTPError("https://export.arxiv.org/api/query", 0, 406)
+            calls["single"] += 1
+            return iter([result_by_id[ids[0]]])
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda paper: None)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", lambda paper: None)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", lambda paper: None)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever.retrieve_papers()
+
+    assert calls["batch"] == 1
+    assert calls["single"] == 2
+    assert {paper.title for paper in papers} == {"Paper 1", "Paper 2"}
+
+
 def test_run_with_hard_timeout_returns_value():
     result = _run_with_hard_timeout(
         _sleep_and_return, ("done", 0.01), timeout=1, operation="test op", paper_title="paper"

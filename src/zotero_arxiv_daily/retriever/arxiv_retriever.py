@@ -136,7 +136,8 @@ class ArxivRetriever(BaseRetriever):
         max_batch_retries = 5
         batch_retry_delay = 30
         for i in range(0, len(all_paper_ids), 20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
+            batch_paper_ids = all_paper_ids[i:i + 20]
+            search = arxiv.Search(id_list=batch_paper_ids)
             for attempt in range(max_batch_retries):
                 try:
                     batch = list(client.results(search))
@@ -149,7 +150,31 @@ class ArxivRetriever(BaseRetriever):
                         logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
                         sleep(wait)
                     else:
-                        raise
+                        logger.warning(
+                            f"arXiv API failed on batch {i // 20} with HTTP {exc.status}; "
+                            "falling back to one-by-one retrieval."
+                        )
+                        for paper_id in batch_paper_ids:
+                            single_search = arxiv.Search(id_list=[paper_id])
+                            for single_attempt in range(max_batch_retries):
+                                try:
+                                    raw_papers.extend(list(client.results(single_search)))
+                                    break
+                                except arxiv.HTTPError as single_exc:
+                                    if single_exc.status == 429 and single_attempt < max_batch_retries - 1:
+                                        wait = batch_retry_delay * (single_attempt + 1)
+                                        logger.warning(
+                                            f"arXiv API 429 on paper {paper_id}, "
+                                            f"retry {single_attempt + 1}/{max_batch_retries} in {wait}s"
+                                        )
+                                        sleep(wait)
+                                    else:
+                                        logger.warning(
+                                            f"Skipping paper {paper_id} due to arXiv API HTTP {single_exc.status}"
+                                        )
+                                        break
+                            bar.update(1)
+                        break
             if i + 20 < len(all_paper_ids):
                 sleep(3)
         bar.close()
